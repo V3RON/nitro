@@ -55,25 +55,24 @@ jsi::Value HybridObjectPrototype::createPrototype(jsi::Runtime& runtime, const s
   }
 
   // 5. Add all properties (getter + setter) to it using defineProperty
-  for (const auto& getter : prototype->getGetters()) {
-    const auto& setter = prototype->getSetters().find(getter.first);
-    bool isReadonly = setter == prototype->getSetters().end();
-    const std::string& name = getter.first;
-    if (isReadonly) {
+  for (const auto& [name, getter] : prototype->getGetters()) {
+    const auto& setterIterator = prototype->getSetters().find(name);
+    if (setterIterator != prototype->getSetters().end()) {
+      // get + set
+      const HybridFunction& setter = setterIterator->second;
+      CommonGlobals::Object::defineProperty(runtime, object, name.c_str(),
+                                            ComputedPropertyDescriptor{// getter + setter
+                                                                       .configurable = false,
+                                                                       .enumerable = true,
+                                                                       .get = getter.toJSFunction(runtime),
+                                                                       .set = setter.toJSFunction(runtime)});
+    } else {
       // get
       CommonGlobals::Object::defineProperty(runtime, object, name.c_str(),
-                                            ComputedReadonlyPropertyDescriptor{// readonly
+                                            ComputedReadonlyPropertyDescriptor{// getter
                                                                                .configurable = false,
                                                                                .enumerable = true,
-                                                                               .get = getter.second.toJSFunction(runtime)});
-    } else {
-      // get + set
-      CommonGlobals::Object::defineProperty(runtime, object, name.c_str(),
-                                            ComputedPropertyDescriptor{// readonly with setter
-                                                                       .configurable = false,
-                                                                       .enumerable = false,
-                                                                       .get = getter.second.toJSFunction(runtime),
-                                                                       .set = setter->second.toJSFunction(runtime)});
+                                                                               .get = getter.toJSFunction(runtime)});
     }
   }
 
@@ -97,11 +96,26 @@ jsi::Value HybridObjectPrototype::createPrototype(jsi::Runtime& runtime, const s
   // 8. Throw it into our cache so the next lookup can be cached and therefore faster
   JSICacheReference jsiCache = JSICache::getOrCreateCache(runtime);
   BorrowingReference<jsi::Object> sharedObject = jsiCache.makeShared(std::move(object));
-  auto instanceId = prototype->getNativeInstanceId();
+  const NativeInstanceId& instanceId = prototype->getNativeInstanceId();
   prototypeCache[instanceId] = sharedObject;
 
   // 9. Return it!
   return jsi::Value(runtime, *sharedObject);
+}
+
+void HybridObjectPrototype::ensureInitialized() {
+  if (!_didLoadMethods) {
+    // lock in case we try to create `HybridObject`s in parallel Runtimes
+    static std::mutex mutex;
+    std::unique_lock lock(mutex);
+    if (_didLoadMethods) [[unlikely]] {
+      // another call to `ensureInitialized()` has initialized in the meantime. abort.
+      return;
+    }
+    // lazy-load all exposed methods
+    loadHybridMethods();
+    _didLoadMethods = true;
+  }
 }
 
 jsi::Value HybridObjectPrototype::getPrototype(jsi::Runtime& runtime) {

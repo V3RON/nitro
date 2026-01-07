@@ -13,8 +13,12 @@ import {
   HybridPlatformObject,
   HybridChild,
 } from 'react-native-nitro-test'
-import type { State } from './Testers'
-import { it } from './Testers'
+import {
+  type AssertionBackend,
+  type State,
+  createTestRunner,
+  throwingBackend,
+} from './testing'
 import { stringify } from './utils'
 import {
   getHybridObjectConstructor,
@@ -35,6 +39,16 @@ type TestResult =
 export interface TestRunner {
   name: string
   run: () => Promise<TestResult>
+}
+
+/**
+ * Options for getTests function
+ */
+export interface GetTestsOptions {
+  /**
+   * The assertion backend to use. Defaults to throwingBackend for in-app testing.
+   */
+  backend?: AssertionBackend
 }
 
 const TEST_PERSON: Person = {
@@ -137,29 +151,31 @@ function sumUpAllPassengers(cars: Car[]): string {
     .join(', ')
 }
 
-function createTest<T>(
-  name: string,
-  run: () => State<T> | Promise<State<T>>
-): TestRunner {
-  return {
-    name: name,
-    run: async (): Promise<TestResult> => {
-      try {
-        console.log(`⏳ Test "${name}" started...`)
-        const state = await run()
-        console.log(`✅ Test "${name}" passed!`)
-        return {
-          status: 'successful',
-          result: stringify(state.result ?? state.errorThrown ?? '(void)'),
+function createCreateTest<T>() {
+  return function createTest(
+    name: string,
+    run: () => State<T> | Promise<State<T>>
+  ): TestRunner {
+    return {
+      name: name,
+      run: async (): Promise<TestResult> => {
+        try {
+          console.log(`⏳ Test "${name}" started...`)
+          const state = await run()
+          console.log(`✅ Test "${name}" passed!`)
+          return {
+            status: 'successful',
+            result: stringify(state.result ?? state.errorThrown ?? '(void)'),
+          }
+        } catch (e) {
+          console.log(`❌ Test "${name}" failed! ${e}`)
+          return {
+            status: 'failed',
+            message: stringify(e),
+          }
         }
-      } catch (e) {
-        console.log(`❌ Test "${name}" failed! ${e}`)
-        return {
-          status: 'failed',
-          message: stringify(e),
-        }
-      }
-    },
+      },
+    }
   }
 }
 
@@ -172,8 +188,13 @@ function debugOnly(string: string): string {
 }
 
 export function getTests(
-  testObject: TestObjectCpp | TestObjectSwiftKotlin
+  testObject: TestObjectCpp | TestObjectSwiftKotlin,
+  options: GetTestsOptions = {}
 ): TestRunner[] {
+  const backend = options.backend ?? throwingBackend
+  const { it } = createTestRunner(backend)
+  const createTest = createCreateTest(it)
+
   return [
     // Basic prototype tests
     createTest('HybridObject.prototype is valid', () =>
@@ -195,7 +216,21 @@ export function getTests(
         .didReturn('string')
         .toStringContain('[empty-object HybridObject')
     ),
-    createTest('Two HybridObjects are not equal (a == b)', () =>
+    createTest('Same HybridObjects are equal (a == b)', () =>
+      it(
+        () =>
+          // eslint-disable-next-line no-self-compare
+          testObject.thisObject === testObject.thisObject
+      )
+        .didNotThrow()
+        .equals(true)
+    ),
+    createTest('Same HybridObjects are equal (a.equals(b))', () =>
+      it(() => testObject.thisObject.equals(testObject.thisObject))
+        .didNotThrow()
+        .equals(true)
+    ),
+    createTest('Different HybridObjects are not equal (a == b)', () =>
       it(
         () =>
           // eslint-disable-next-line no-self-compare
@@ -204,12 +239,12 @@ export function getTests(
         .didNotThrow()
         .equals(false)
     ),
-    createTest('Two HybridObjects are not equal (a.equals(b))', () =>
+    createTest('Different HybridObjects are not equal (a.equals(b))', () =>
       it(() => testObject.newTestObject().equals(testObject.newTestObject()))
         .didNotThrow()
         .equals(false)
     ),
-    createTest("Two HybridObjects's prototypes are equal", () =>
+    createTest("Different HybridObjects's prototypes are equal", () =>
       it(() => {
         const objA = testObject.newTestObject()
         const objB = testObject.newTestObject()
